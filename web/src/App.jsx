@@ -2,22 +2,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import './index.css';
 
-import TopNav from './components/TopNav';
 import QueryBar from './components/QueryBar';
-import VolumeHistogram from './components/VolumeHistogram';
-import StreamSidebar from './components/StreamSidebar';
 import LogViewer from './components/LogViewer';
-import LoginPage from './components/LoginPage';
 
 import { api } from './lib/api.js';
 import { parseQuery, timeRangeToMs, normalizeLogEntry, applyLabelFilters } from './lib/queryParser.js';
-import { generateInitialLogs, generateHistogramData, STREAM_FACETS, TIME_RANGES } from './lib/mockData';
 
 // ── URL state helpers ────────────────────────────────────────────────
 function readUrlState() {
   const p = new URLSearchParams(window.location.search);
   return {
-    query:     p.get('q')       || '{app="nginx", env="prod"} | "error" OR "timeout"',
+    query:     p.get('q')       || 'timeout',
     timeRange: Number(p.get('minutes')) || 15,
     isLive:    p.get('live')   === '1',
   };
@@ -30,8 +25,7 @@ function writeUrlState({ query, timeRange, isLive }) {
   window.history.replaceState({}, '', `?${p.toString()}`);
 }
 
-// ── SSE ring-buffer cap ──────────────────────────────────────────────
-const SSE_MAX_LINES = 5000;
+const LIVE_MAX_LINES = 5000;
 
 // ── Error banner ─────────────────────────────────────────────────────
 function ErrorBanner({ error, onDismiss }) {
@@ -51,7 +45,7 @@ function ErrorBanner({ error, onDismiss }) {
       </svg>
       <span style={{ fontSize: '11px', color: isEngineDown ? '#f59e0b' : '#f87171', fontFamily: 'JetBrains Mono', flex: 1 }}>
         {isEngineDown
-          ? `Go engine offline (gRPC unavailable) — showing demo data. Start the engine or check port 50051.`
+          ? `Go engine unavailable — start the Go engine and verify the gRPC socket.`
           : error.message}
       </span>
       {error.details && (
@@ -63,29 +57,23 @@ function ErrorBanner({ error, onDismiss }) {
 }
 
 export default function App() {
-  // ── Auth ──────────────────────────────────────────────────────────
-  const [isAuthenticated, setIsAuthenticated] = useState(() => api.isAuthenticated());
-
   // ── Core state ────────────────────────────────────────────────────
   const initial = readUrlState();
-  const [activeView, setActiveView] = useState('EXPLORE');
   const [query,      setQuery]      = useState(initial.query);
   const [timeRange,  setTimeRange]  = useState(initial.timeRange);
   const [isLive,     setIsLive]     = useState(initial.isLive);
   const [isLoading,  setIsLoading]  = useState(false);
   const [logs,       setLogs]       = useState([]);
-  const [histData,   setHistData]   = useState([]);
-  const [facets,     setFacets]     = useState(STREAM_FACETS);
   const [newLogCount, setNewLogCount] = useState(0);
-  const [sseConnected, setSseConnected] = useState(false);
+  const [socketState, setSocketState] = useState('off');
 
   // ── Query result meta ─────────────────────────────────────────────
   const [executionTimeNs, setExecutionTimeNs] = useState(0);
-  const [dataSource,      setDataSource]      = useState('mock'); // 'engine' | 'mock'
+  const [dataSource,      setDataSource]      = useState('engine');
   const [queryError,      setQueryError]      = useState(null);
 
   // ── Refs ──────────────────────────────────────────────────────────
-  const sseRef       = useRef(null);
+  const socketRef    = useRef(null);
   const bufferRef    = useRef([]);
   const newCountRef  = useRef(0);
 
@@ -124,42 +112,29 @@ export default function App() {
       setExecutionTimeNs(result.meta?.executionTimeNs ?? 0);
       setDataSource('engine');
 
-      // Refresh histogram from real time range
-      setHistData(generateHistogramData(tr, tr > 60 ? 5 : 0.5));
-
     } catch (err) {
       setQueryError(err);
 
-      if (err.code === 'AUTH_REQUIRED') {
-        setIsAuthenticated(false);
-        return;
-      }
-
-      // Engine unavailable — load mock data so the UI isn't empty
-      if (dataSource !== 'engine') {
-        const mock = generateInitialLogs(300);
-        setLogs(mock);
-        setHistData(generateHistogramData(tr, tr > 60 ? 5 : 0.5));
-      }
-      setDataSource('mock');
+      setLogs([]);
+      setDataSource('engine');
       setExecutionTimeNs(0);
     } finally {
       setIsLoading(false);
     }
-  }, [query, timeRange, dataSource]);
+  }, [query, timeRange]);
 
-  // Run initial query when authenticated
+  // Run initial query on mount
   useEffect(() => {
-    if (isAuthenticated) runQuery();
+    runQuery();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAuthenticated]);
+  }, []);
 
-  // ── Live tail via SSE (EventSource → GET /api/logs/stream) ────────
+  // ── Live tail via WebSocket ───────────────────────────────────────
   useEffect(() => {
     if (!isLive) {
-      if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+      if (socketRef.current) { socketRef.current.close(1000, 'live tail disabled'); socketRef.current = null; }
       bufferRef.current = [];
-      setSseConnected(false);
+      setSocketState('off');
       return;
     }
 
@@ -167,61 +142,35 @@ export default function App() {
     setNewLogCount(0);
     bufferRef.current = [];
 
-    // Snapshot the query at effect-start time.
-    // Do NOT put `query` in the dep array — it would tear down & reconnect
-    // SSE on every keystroke while the user is editing the query bar.
     const parsed = parseQuery(query);
-    const sseUrl = api.sseUrl(parsed.primaryTerm);
-
-    const es = new EventSource(sseUrl);
-    sseRef.current = es;
-
-    // Connection established: HTTP 200 received, stream is open
-    es.onopen = () => {
-      setSseConnected(true);
-      setQueryError(null); // dismiss any previous error banner
+    let stopped = false;
+    let reconnectTimer;
+    let ws;
+    const connect = () => {
+      if (stopped) return;
+      setSocketState('connecting');
+      ws = new WebSocket(api.websocketUrl(parsed.primaryTerm));
+      socketRef.current = ws;
+      ws.onopen = () => setSocketState('connected');
+      ws.onmessage = (event) => {
+        try {
+          const packet = JSON.parse(event.data);
+          if (packet.type === 'status') { setSocketState(packet.state); return; }
+          if (packet.type === 'error') { setSocketState('error'); setQueryError({ code: 'STREAM_ERROR', message: packet.error }); return; }
+          if (packet.type !== 'log') return;
+          const entry = packet.log || {};
+          const normalized = normalizeLogEntry({ ...entry, timestamp_nano: entry.timestamp_nano || String(Date.now() * 1e6) }, Date.now());
+          setDataSource('engine');
+          bufferRef.current.push(normalized);
+        } catch (err) { console.error('[WebSocket] parse error:', err); }
+      };
+      ws.onerror = () => setSocketState('error');
+      ws.onclose = () => {
+        if (socketRef.current === ws) socketRef.current = null;
+        if (!stopped) reconnectTimer = setTimeout(connect, 1000);
+      };
     };
-
-    // Default data frame from the server
-    es.onmessage = (event) => {
-      try {
-        const entry = JSON.parse(event.data);
-        const isMock = Boolean(entry._mock); // server signals demo mode
-        const normalized = {
-          id:        entry.id || `sse-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          timestamp: entry.timestamp_nano
-            ? new Date(Math.floor(Number(entry.timestamp_nano) / 1_000_000)).toISOString()
-            : entry.timestamp || new Date().toISOString(),
-          level:   (entry.level || 'INFO').toUpperCase(),
-          host:    entry.host    || 'stream',
-          app:     entry.app     || 'sse',
-          env:     entry.env     || 'prod',
-          message: entry.message || '',
-          meta:    entry.meta    || {},
-        };
-        setDataSource(isMock ? 'mock' : 'engine');
-        bufferRef.current.push(normalized);
-      } catch (err) {
-        console.error('[SSE] parse error:', err);
-      }
-    };
-
-    // Raw TCP/HTTP connection error (network drop, auth failure, server restart).
-    // This is different from named SSE 'error' events — it fires when the
-    // EventSource cannot maintain the underlying HTTP connection at all.
-    es.onerror = () => {
-      setSseConnected(false);
-      // CLOSED = browser gave up reconnecting (happens after a non-200 response
-      // like 401/403, or after the server deliberately ends the stream).
-      if (es.readyState === EventSource.CLOSED) {
-        sseRef.current = null;
-        setQueryError({
-          message: 'SSE stream closed — toggle Live Tail off/on to reconnect.',
-          code: 'SSE_CLOSED',
-        });
-      }
-      // CONNECTING = browser is auto-retrying (transient error), do nothing.
-    };
+    connect();
 
     // 350 ms flush: drain accumulated buffer into React state in one batch.
     // Prevents a setState call for every single incoming log line.
@@ -232,15 +181,27 @@ export default function App() {
       setNewLogCount(newCountRef.current);
       setLogs(prev => {
         const merged = [...batch, ...prev];
-        return merged.slice(0, SSE_MAX_LINES); // enforce ring-buffer cap
+        return merged.slice(0, LIVE_MAX_LINES);
       });
     }, 350);
 
     return () => {
-      if (sseRef.current) { sseRef.current.close(); sseRef.current = null; }
+      stopped = true;
+      clearTimeout(reconnectTimer);
+      const current = socketRef.current;
+      if (current) {
+        if (current.readyState === WebSocket.CONNECTING) {
+          current.onopen = () => current.close(1000, 'live tail disabled');
+          current.onmessage = null;
+          current.onerror = null;
+        } else {
+          current.close(1000, 'live tail disabled');
+        }
+        socketRef.current = null;
+      }
       clearInterval(flushInterval);
       bufferRef.current = [];
-      setSseConnected(false);
+      setSocketState('off');
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLive]); // query intentionally omitted — snapshotted above
@@ -256,36 +217,13 @@ export default function App() {
     return () => document.removeEventListener('keydown', handler);
   }, []);
 
-  // Histogram live refresh every 10s
-  useEffect(() => {
-    if (!isLive) return;
-    const id = setInterval(() => {
-      setHistData(generateHistogramData(timeRange, timeRange > 60 ? 5 : 0.5));
-    }, 10_000);
-    return () => clearInterval(id);
-  }, [isLive, timeRange]);
-
-  // ── Login gate ────────────────────────────────────────────────────
-  if (!isAuthenticated) {
-    return <LoginPage onSuccess={() => setIsAuthenticated(true)} />;
-  }
-
-  const selectedRange = TIME_RANGES.find(r => r.minutes === timeRange) || TIME_RANGES[1];
-
   return (
     <div style={{
       height: '100vh', width: '100vw',
       display: 'flex', flexDirection: 'column',
       background: '#0b0f19', overflow: 'hidden',
     }}>
-      {/* ── Top Navigation ── */}
-      <TopNav
-        activeView={activeView}
-        onViewChange={setActiveView}
-        onLogout={() => { api.clearToken(); setIsAuthenticated(false); }}
-      />
-
-      {/* ── Page header row ── */}
+      {/* ── Connection/status row ── */}
       <div style={{
         padding: '6px 16px',
         borderBottom: '1px solid #1e2d3d',
@@ -293,13 +231,13 @@ export default function App() {
         display: 'flex', alignItems: 'center', gap: '12px', flexShrink: 0,
       }}>
         <h1 style={{ fontSize: '11px', fontWeight: 700, color: '#6b7280', letterSpacing: '0.12em' }}>
-          {activeView}
+          CHRONOLOG
         </h1>
 
-        {sseConnected && (
+        {isLive && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
             <div className="live-pulse" style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#06b6d4' }} />
-            <span style={{ fontSize: '10px', color: '#06b6d4' }}>SSE Connected</span>
+            <span style={{ fontSize: '10px', color: socketState === 'connected' ? '#22c55e' : '#f59e0b' }}>Live tail {socketState}</span>
           </div>
         )}
 
@@ -348,20 +286,13 @@ export default function App() {
         timeRange={timeRange}
         onTimeRangeChange={(m) => { setTimeRange(m); runQuery(query, m); }}
         isLive={isLive}
-        onLiveToggle={() => setIsLive(v => !v)}
+        onLiveToggle={() => { setIsLive(v => !v); runQuery(); }}
         onRunQuery={() => runQuery()}
         isLoading={isLoading}
       />
 
-      {/* ── Volume Histogram ── */}
-      {histData.length > 0 && (
-        <VolumeHistogram data={histData} timeRangeLabel={selectedRange.label} />
-      )}
-
-      {/* ── Main Body: Sidebar + Log Table ── */}
+      {/* ── Log table ── */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
-        <StreamSidebar facets={facets} onFacetsChange={setFacets} />
-
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, minWidth: 0 }}>
           <LogViewer
             logs={logs}

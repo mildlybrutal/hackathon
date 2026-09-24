@@ -37,7 +37,7 @@ function highlightText(text, query) {
   // Extract plain text terms from query (ignore label selectors)
   const terms = query
     .split(/\s+/)
-    .map(t => t.replace(/[^a-z0-9_\-\.]/gi, ''))
+    .map(t => t.replace(/[^a-z0-9_\-.]/gi, ''))
     .filter(t => t.length > 2);
 
   if (!terms.length) return text;
@@ -224,7 +224,7 @@ export default function LogViewer({ logs, query, isLoading, isLive, newLogCount,
     if (isLive && autoScroll && logs.length > 0) {
       virtualizer.scrollToIndex(0, { behavior: 'smooth' });
     }
-  }, [logs.length, isLive, autoScroll]);
+  }, [logs.length, isLive, autoScroll, virtualizer]);
 
   const toggleExpand = useCallback((id) => {
     setExpandedIds(prev => {
@@ -363,17 +363,6 @@ export default function LogViewer({ logs, query, isLoading, isLive, newLogCount,
             borderRadius: '3px', padding: '1px 6px',
           }}>
             ● engine
-          </span>
-        )}
-        {dataSource === 'mock' && (
-          <span style={{
-            fontSize: '10px', fontFamily: 'JetBrains Mono',
-            color: '#f59e0b',
-            background: 'rgba(245,158,11,0.08)',
-            border: '1px solid rgba(245,158,11,0.15)',
-            borderRadius: '3px', padding: '1px 6px',
-          }}>
-            ◌ demo
           </span>
         )}
 
