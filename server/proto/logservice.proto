@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package logengine;
+option go_package = "engine/proto/logengine";
+
+service LogService {
+  rpc Query (QueryRequest) returns (QueryResponse);
+  rpc StreamQuery (QueryRequest) returns (stream LogEntry);
+}
+
+message QueryRequest {
+  string term = 1;
+  int64 start_time_nano = 2;
+  int64 end_time_nano = 3;
+  int32 limit = 4;
+}
+
+message LogEntry {
+  int64 timestamp_nano = 1;
+  string message = 2;
+}
+
+message QueryResponse {
+  repeated LogEntry logs = 1;
+  int64 total_found = 2;
+  string error = 3;
+}
