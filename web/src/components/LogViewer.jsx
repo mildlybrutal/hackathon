@@ -203,7 +203,7 @@ function LogRow({ log, isExpanded, onToggle, query, isNew }) {
   );
 }
 
-export default function LogViewer({ logs, query, isLoading, isLive, newLogCount }) {
+export default function LogViewer({ logs, query, isLoading, isLive, newLogCount, executionTimeNs, dataSource }) {
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [autoScroll, setAutoScroll] = useState(true);
   const parentRef = useRef(null);
@@ -352,6 +352,41 @@ export default function LogViewer({ logs, query, isLoading, isLive, newLogCount 
         <span style={{ fontSize: '10px', color: '#374151', fontFamily: 'JetBrains Mono' }}>
           {logs.length.toLocaleString()} lines
         </span>
+
+        {/* Data source indicator */}
+        {dataSource === 'engine' && (
+          <span style={{
+            fontSize: '10px', fontFamily: 'JetBrains Mono',
+            color: '#34d399',
+            background: 'rgba(16,185,129,0.08)',
+            border: '1px solid rgba(16,185,129,0.15)',
+            borderRadius: '3px', padding: '1px 6px',
+          }}>
+            ● engine
+          </span>
+        )}
+        {dataSource === 'mock' && (
+          <span style={{
+            fontSize: '10px', fontFamily: 'JetBrains Mono',
+            color: '#f59e0b',
+            background: 'rgba(245,158,11,0.08)',
+            border: '1px solid rgba(245,158,11,0.15)',
+            borderRadius: '3px', padding: '1px 6px',
+          }}>
+            ◌ demo
+          </span>
+        )}
+
+        {/* Real engine execution time */}
+        {executionTimeNs > 0 && (
+          <span style={{ fontSize: '10px', color: '#4b5563', fontFamily: 'JetBrains Mono' }}>
+            {executionTimeNs < 1_000_000
+              ? `${(executionTimeNs / 1000).toFixed(1)} µs`
+              : `${(executionTimeNs / 1_000_000).toFixed(2)} ms`
+            } query
+          </span>
+        )}
+
         {isLive && (
           <>
             <div className="live-pulse" style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#06b6d4' }} />

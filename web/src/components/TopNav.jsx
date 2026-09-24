@@ -3,7 +3,7 @@ import { useState } from 'react';
 
 const NAV_ITEMS = ['DASHBOARD', 'EXPLORE', 'ALERTS', 'ADMIN'];
 
-export default function TopNav({ activeView, onViewChange }) {
+export default function TopNav({ activeView, onViewChange, onLogout }) {
   const [tenant, setTenant] = useState('Default');
 
   return (
@@ -110,6 +110,22 @@ export default function TopNav({ activeView, onViewChange }) {
             <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
           </svg>
         </button>
+
+        {/* Logout */}
+        {onLogout && (
+          <button
+            id="logout-btn"
+            onClick={onLogout}
+            title="Sign out"
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', padding: '4px', transition: 'color 0.15s' }}
+            onMouseEnter={e => e.currentTarget.style.color = '#f87171'}
+            onMouseLeave={e => e.currentTarget.style.color = '#6b7280'}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />
+            </svg>
+          </button>
+        )}
 
         {/* Settings icon */}
         <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6b7280', padding: '4px' }}
